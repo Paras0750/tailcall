@@ -1,4 +1,4 @@
-#![allow(clippy::too_many_arguments)]
+
 
 use std::collections::BTreeMap;
 
@@ -57,34 +57,50 @@ fn to_root_schema(schema_definition: &SchemaDefinition) -> RootSchema {
 fn pos_name_to_string(pos: &Positioned<Name>) -> String {
   pos.node.to_string()
 }
+struct ObjectTypeData {
+  fields: Vec<Positioned<FieldDefinition>>,
+  description: Option<Positioned<String>>,
+  is_interface: bool,
+  implements: Vec<Positioned<Name>>,
+}
+
 fn to_types(type_definitions: &Vec<&Positioned<TypeDefinition>>) -> BTreeMap<String, config::Type> {
   let mut types = BTreeMap::new();
   for type_definition in type_definitions {
-    let type_name = pos_name_to_string(&type_definition.node.name);
-    let type_opt = match type_definition.node.kind.clone() {
-      TypeKind::Object(object_type) => Some(to_object_type(
-        &object_type.fields,
-        &type_definition.node.description,
-        &false,
-        &object_type.implements,
-      )),
-      TypeKind::Interface(interface_type) => Some(to_object_type(
-        &interface_type.fields,
-        &type_definition.node.description,
-        &true,
-        &interface_type.implements,
-      )),
-      TypeKind::Enum(enum_type) => Some(to_enum(enum_type)),
-      TypeKind::InputObject(input_object_type) => Some(to_input_object(input_object_type)),
-      TypeKind::Union(_) => None,
-      TypeKind::Scalar => Some(to_scalar_type()),
-    };
-    if let Some(type_) = type_opt {
-      types.insert(type_name, type_);
-    }
+      let type_name = pos_name_to_string(&type_definition.node.name);
+      let type_opt = match type_definition.node.kind.clone() {
+          TypeKind::Object(object_type) => Some(to_object_type(ObjectTypeData {
+              fields: object_type.fields,
+              description: type_definition.node.description.clone(),
+              is_interface: false,
+              implements: object_type.implements,
+          })),
+          TypeKind::Interface(interface_type) => Some(to_object_type(ObjectTypeData {
+              fields: interface_type.fields,
+              description: type_definition.node.description.clone(),
+              is_interface: true,
+              implements: interface_type.implements,
+          })),
+          TypeKind::Enum(enum_type) => Some(to_enum(enum_type)),
+          TypeKind::InputObject(input_object_type) => Some(to_input_object(input_object_type)),
+          TypeKind::Union(_) => None,
+          TypeKind::Scalar => Some(to_scalar_type()),
+      };
+      if let Some(type_) = type_opt {
+          types.insert(type_name, type_);
+      }
   }
   types
 }
+
+fn to_object_type(data: ObjectTypeData) -> config::Type {
+  let fields = to_fields(&data.fields);
+  let doc = data.description.map(|pos| pos.node.clone());
+  let interface = Some(data.is_interface);
+  let implements = Some(data.implements.iter().map(|pos| pos.node.to_string()).collect());
+  config::Type { fields, doc, interface, implements, variants: None, scalar: None }
+}
+
 fn to_scalar_type() -> config::Type {
   config::Type {
     fields: BTreeMap::new(),
@@ -110,18 +126,7 @@ fn to_union_types(type_definitions: &Vec<&Positioned<TypeDefinition>>) -> BTreeM
   }
   unions
 }
-fn to_object_type(
-  fields: &Vec<Positioned<FieldDefinition>>,
-  description: &Option<Positioned<String>>,
-  is_interface: &bool,
-  implements: &[Positioned<Name>],
-) -> config::Type {
-  let fields = to_fields(fields);
-  let doc = description.as_ref().map(|pos| pos.node.clone());
-  let interface = Some(*is_interface);
-  let implements = Some(implements.iter().map(|pos| pos.node.to_string()).collect());
-  config::Type { fields, doc, interface, implements, variants: None, scalar: None }
-}
+
 fn to_enum(enum_type: EnumType) -> config::Type {
   let variants = enum_type
     .values
@@ -162,58 +167,67 @@ fn to_input_object_fields(
 ) -> BTreeMap<String, config::Field> {
   to_fields_inner(input_object_fields, to_input_object_field)
 }
+struct FieldConfig {
+    type_: Type,
+    base: BaseType,
+    nullable: bool,
+    args: Option<BTreeMap<String, config::Arg>>,
+    description: Option<Positioned<String>>,
+    directives: Vec<Positioned<ConstDirective>>,
+}
+
 fn to_field(field_definition: &FieldDefinition) -> config::Field {
-  to_common_field(
-    &field_definition.ty.node,
-    &field_definition.ty.node.base,
-    field_definition.ty.node.nullable,
-    Some(to_args(field_definition)),
-    &field_definition.description,
-    &field_definition.directives,
-  )
+    let config = FieldConfig {
+        type_: field_definition.ty.node.clone(),
+        base: field_definition.ty.node.base.clone(),
+        nullable: field_definition.ty.node.nullable,
+        args: Some(to_args(field_definition)),
+        description: field_definition.description.clone(),
+        directives: field_definition.directives.clone(),
+    };
+
+    to_common_field(&config)
 }
 fn to_input_object_field(field_definition: &InputValueDefinition) -> config::Field {
-  to_common_field(
-    &field_definition.ty.node,
-    &field_definition.ty.node.base,
-    field_definition.ty.node.nullable,
-    None,
-    &field_definition.description,
-    &field_definition.directives,
-  )
+    let config = FieldConfig {
+        type_: field_definition.ty.node.clone(),
+        base: field_definition.ty.node.base.clone(),
+        nullable: field_definition.ty.node.nullable,
+        args: None,
+        description: field_definition.description.clone(),
+        directives: field_definition.directives.clone(),
+    };
+
+    to_common_field(&config)
 }
-fn to_common_field(
-  type_: &Type,
-  base: &BaseType,
-  nullable: bool,
-  args: Option<BTreeMap<String, config::Arg>>,
-  description: &Option<Positioned<String>>,
-  directives: &[Positioned<ConstDirective>],
-) -> config::Field {
-  let type_of = to_type_of(type_);
-  let list = Some(matches!(&base, BaseType::List(_)));
-  let required = if nullable { None } else { Some(false) };
-  let list_type_required = Some(matches!(&base, BaseType::List(ty) if !ty.nullable));
-  let doc = description.as_ref().map(|pos| pos.node.clone());
-  let modify = to_modify(directives);
-  let inline = to_inline(directives);
-  let http = to_http(directives);
-  let unsafe_operation = to_unsafe_operation(directives);
-  let batch = to_batch(directives);
-  config::Field {
-    type_of,
-    list,
-    required,
-    list_type_required,
-    args,
-    doc,
-    modify,
-    inline,
-    http,
-    unsafe_operation,
-    batch,
-  }
+
+fn to_common_field(config: &FieldConfig) -> config::Field {
+    let type_of = to_type_of(&config.type_);
+    let list = Some(matches!(&config.base, BaseType::List(_)));
+    let required = if config.nullable { None } else { Some(false) };
+    let list_type_required = Some(matches!(&config.base, BaseType::List(ty) if !ty.nullable));
+    let doc = config.description.as_ref().map(|pos| pos.node.clone());
+    let modify = to_modify(&config.directives);
+    let inline = to_inline(&config.directives);
+    let http = to_http(&config.directives);
+    let unsafe_operation = to_unsafe_operation(&config.directives);
+    let batch = to_batch(&config.directives);
+
+    config::Field {
+        type_of,
+        list,
+        required,
+        list_type_required,
+        args: config.args.clone(),
+        doc,
+        modify,
+        inline,
+        http,
+        unsafe_operation,
+        batch,
+    }
 }
+
 fn to_unsafe_operation(directives: &[Positioned<ConstDirective>]) -> Option<config::Unsafe> {
   directives.iter().find_map(|directive| {
     if directive.node.name.node == "unsafe" {
